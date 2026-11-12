@@ -1,0 +1,28 @@
+{
+  "database": "~/Library/Application Support/goldfish/goldfish.db",
+  "native_mcp_url": null,
+  "collection_id": null,
+  "friction_collection_id": null,
+  "lanes": {
+    "work_apps": ["native desktop", "native-desktop", "terminal", "iterm2", "visual studio code"],
+    "work_domains": ["app.withnative.ai", "github.com", "docs.google.com"],
+    "careful_apps": ["whatsapp", "messages", "signal", "telegram"],
+    "careful_domains": ["web.whatsapp.com", "web.telegram.org"],
+    "agent_visible": ["work", "careful"]
+  },
+  "review": {
+    "exclusions": "explicit",
+    "max_flags": 100,
+    "native_context_limit": 60,
+    "claude_command": ["claude"],
+    "model": null,
+    "timeout_seconds": 600,
+    "max_turns": 30,
+    "native_search": true,
+    "auto_write": true,
+    "auto_max_per_run": 10,
+    "interval_seconds": 3600,
+    "schedule_minute": null,
+    "notify": true
+  }
+}
