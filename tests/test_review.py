@@ -486,6 +486,43 @@ class ReviewTests(unittest.TestCase):
                 with kit.locked(self.home):
                     pass
 
+    def test_review_reports_progress_while_it_works(self):
+        self.config.update(native_mcp_url='http://fake-native.invalid/mcp', collection_id='collection')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kit.review(self.home, self.config)
+        self.assertRegex(out.getvalue(), r'\[\d\d:\d\d:\d\d\] 34 new flags to review')
+        self.assertIn('Asking Claude to judge them', out.getvalue())
+
+    def stopped_reviewer(self, reason, **patches):
+        # A reviewer that would outlive us, with a grandchild like Claude's MCP server.
+        marker = self.root / 'grandchild.pid'
+        script = ('import subprocess,sys,time\n'
+                  'p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])\n'
+                  'open(%r, "w").write(str(p.pid)); time.sleep(60)\n' % str(marker))
+        started = time.monotonic()
+        with self.assertRaises(reason), contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.ExitStack() as stack:
+                for name, value in patches.items():
+                    stack.enter_context(patch.object(kit.os, name, value))
+                kit.run_claude([sys.executable, '-c', script], '{}', str(self.root), patches and 30 or 2)
+        self.assertLess(time.monotonic() - started, 20)
+        pid = int(marker.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail('reviewer grandchild still running')
+
+    def test_timeout_stops_the_whole_reviewer(self):
+        self.stopped_reviewer(subprocess.TimeoutExpired)
+
+    def test_losing_the_caller_stops_the_reviewer(self):
+        parents = iter([111])
+        self.stopped_reviewer(kit.Interrupted, getppid=lambda: next(parents, 1))
+
 
 class ReaderTests(unittest.TestCase):
     def test_reader_exposes_only_reads_and_logs_what_was_seen(self):

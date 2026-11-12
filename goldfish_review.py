@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +27,48 @@ LABEL = 'ai.withnative.goldfish-review'
 
 class Error(Exception):
     pass
+
+
+class Interrupted(Exception):
+    pass
+
+
+def progress(message):
+    # Timestamped so a slow review is visibly alive, and so the scheduled log says when each run happened.
+    print('[%s] %s' % (time.strftime('%H:%M:%S'), message), flush=True)
+
+
+def run_claude(command, payload, directory, timeout):
+    """Run the reviewer in its own process group so an interrupt, timeout or lost caller stops all of it."""
+    parent = os.getppid()
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, cwd=directory, start_new_session=True)
+    started = time.monotonic()
+    feed, beat = payload, 60
+    try:
+        while True:
+            try:
+                out, err = child.communicate(feed, timeout=1)
+                return subprocess.CompletedProcess(command, child.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                feed = None
+            elapsed = time.monotonic() - started
+            if elapsed > timeout:
+                raise subprocess.TimeoutExpired(command, timeout)
+            if os.getppid() != parent:
+                # Whatever started us has gone (e.g. an agent's interrupted shell); don't carry on unseen.
+                raise Interrupted('the program that started this review has stopped')
+            if elapsed >= beat:
+                progress('Claude is still reviewing (%d min so far)...' % (elapsed // 60))
+                beat += 60
+    finally:
+        if child.poll() is None:
+            for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, sig)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(grace)
+                    break
 
 
 def digest(value):
@@ -314,6 +357,7 @@ def review(home, config, new_only=False):
     if not rows:
         print('No new eligible flags.' if new_only else 'No pending eligible flags.')
         return
+    progress('%d new flag%s to review. Reading Native context...' % (len(rows), '' if len(rows) == 1 else 's'))
     context, context_note = native_context(config)
     friction_records = friction_context(config)
     context = context + friction_records
@@ -353,8 +397,8 @@ def review(home, config, new_only=False):
             command += ['--allowedTools', ','.join('mcp__native__' + t['name'] for t in reader.TOOLS)]
         if config['review']['model']:
             command += ['--model', config['review']['model']]
-        run = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True,
-                             cwd=directory, timeout=config['review']['timeout_seconds'])
+        progress('Asking Claude to judge them; this usually takes a few minutes...')
+        run = run_claude(command, json.dumps(payload), directory, config['review']['timeout_seconds'])
         reads = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
     if run.returncode:
         raise Error('Claude review failed (exit %d); checkpoint unchanged. Check Claude authentication/version.' % run.returncode)
@@ -400,6 +444,8 @@ def review(home, config, new_only=False):
     validate_items(items, rows, seen, collections, friction)
     source_by_id = {r['flag_id']: r for r in rows}
     native = Native(config) if any(i['recommendation'] == 'include' for i in items) else None
+    if native:
+        progress('Checking proposed destinations in Native...')
     unresolved = False
     try:
         if native:
@@ -986,9 +1032,20 @@ def main(argv=None):
             print('Native context: %d records. %s' % (len(context), note))
 
 
+def interrupted(signum, frame):
+    raise Interrupted(signal.Signals(signum).name)
+
+
 if __name__ == '__main__':
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupted)
     try:
         main()
+    except (Interrupted, KeyboardInterrupt) as error:
+        # Flags are only marked reviewed once their review is saved, so unfinished work is picked up next run.
+        print('goldfish-review: stopped (%s). Anything not yet saved will be reviewed next time.'
+              % (error or 'interrupted'), file=sys.stderr)
+        sys.exit(130)
     except (Error, nc.SyncError, OSError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.TimeoutExpired) as error:
         print('goldfish-review: %s' % error, file=sys.stderr)
         sys.exit(1)

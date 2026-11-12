@@ -75,6 +75,9 @@ text empty. Do not repeat intimate details to show you noticed them.
 1. Run `./goldfish briefing`. It shows everything still unhandled across saved
    reviews, plus what was added automatically since they last looked. If it says
    flags have not been reviewed yet, run `./goldfish review --new-only` first.
+   It takes a few minutes (it asks Claude to judge them) and prints timestamped
+   progress. Say so before starting, and run it in the background if your shell
+   only shows output at the end, so it doesn't look hung.
 2. Lead with what was added automatically (one line each, with undo), then what
    needs a yes, then what needs their judgement. Keep exclusions brief unless asked.
 3. Talk it through. You may investigate further in Native with your own tools.
