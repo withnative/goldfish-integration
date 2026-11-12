@@ -95,6 +95,7 @@ keeps every Claude session consistent).
 ```sh
 ./goldfish briefing                 # everything unhandled + what was added automatically
 ./goldfish latest                   # the last review again
+./goldfish status                   # is a review running? where did the last one get to?
 ./goldfish undo RECORD_ID           # archive something the kit wrote
 ./goldfish decide 18,19 dismissed   # local only; flag IDs, not item numbers
 ./goldfish decide 18 later --hours 24

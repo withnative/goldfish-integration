@@ -494,6 +494,42 @@ class ReviewTests(unittest.TestCase):
         self.assertRegex(out.getvalue(), r'\[\d\d:\d\d:\d\d\] 34 new flags to review')
         self.assertIn('Asking Claude to judge them', out.getvalue())
 
+    def status(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kit.run_status(self.home)
+        return out.getvalue()
+
+    def test_status_says_where_a_review_got_to(self):
+        self.assertIn('No review with flags has run yet', self.status())
+        working = self.config['review']['claude_command']
+        self.config['review']['claude_command'] = [sys.executable, '-c', 'print("{}")']
+        kit.write(self.home / 'config.json', self.config)
+        with self.assertRaises(kit.Error), contextlib.redirect_stdout(io.StringIO()):
+            kit.review(self.home, self.config, new_only=True)
+        report = self.status()
+        self.assertRegex(report, r'Last review stopped at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d '
+                                 r'\(Claude returned no structured review.*\), after: Asking Claude')
+        self.assertIn('34 flags waiting for review', report)
+        # Killed outright: no closing line, and nothing holds the lock.
+        log = self.home / 'review.log'
+        log.write_text(log.read_text().rsplit('[', 1)[0])
+        self.assertIn('Last review ended without finishing', self.status())
+        # Still going: another process holds the lock, and status answers without waiting for it.
+        import fcntl
+        with (self.home / 'lock').open('a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertRegex(self.status(), r'A review is running \(started .*\)\. Latest step at .*: Asking Claude')
+        self.config['review']['claude_command'] = working
+        self.prepare()
+        report = self.status()
+        self.assertRegex(report, r'Last review finished at .* Review saved: .*\.json')
+        self.assertIn('Nothing waiting for review', report)
+        # A later run with nothing to do keeps the last real run's log.
+        with contextlib.redirect_stdout(io.StringIO()):
+            kit.review(self.home, self.config, new_only=True)
+        self.assertIn('Last review finished', self.status())
+
     def stopped_reviewer(self, reason, **patches):
         # A reviewer that would outlive us, with a grandchild like Claude's MCP server.
         marker = self.root / 'grandchild.pid'

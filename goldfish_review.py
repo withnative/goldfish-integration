@@ -33,9 +33,15 @@ class Interrupted(Exception):
     pass
 
 
+RUN_LOG = None  # review.log while a review runs, so `status` can say where it got to
+
+
 def progress(message):
     # Timestamped so a slow review is visibly alive, and so the scheduled log says when each run happened.
     print('[%s] %s' % (time.strftime('%H:%M:%S'), message), flush=True)
+    if RUN_LOG:
+        with RUN_LOG.open('a') as stream:
+            stream.write('[%s] %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), message))
 
 
 def run_claude(command, payload, directory, timeout):
@@ -69,6 +75,8 @@ def run_claude(command, payload, directory, timeout):
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     child.wait(grace)
                     break
+        for stream in (child.stdin, child.stdout, child.stderr):
+            stream.close()
 
 
 def digest(value):
@@ -352,11 +360,34 @@ def skill_file(home, config):
 
 
 def review(home, config, new_only=False):
+    global RUN_LOG
     state = state_load(home)
     rows, counts = flags(config, state, new_only)
     if not rows:
         print('No new eligible flags.' if new_only else 'No pending eligible flags.')
         return
+    # Only runs with flags replace the log, so an empty hourly run never hides how the last real one ended.
+    RUN_LOG = home / 'review.log'
+    nc.private_write(RUN_LOG, '')
+    try:
+        path = review_flags(home, config, state, rows, counts)
+        progress('Done. Review saved: %s' % path.name)
+    except BaseException as error:
+        progress('Stopped: %s' % stop_reason(error))
+        raise
+    finally:
+        RUN_LOG = None
+
+
+def stop_reason(error):
+    if isinstance(error, KeyboardInterrupt):
+        return 'interrupted'
+    if isinstance(error, subprocess.TimeoutExpired):
+        return 'Claude took longer than %d seconds' % error.timeout
+    return str(error).splitlines()[0] if str(error) else type(error).__name__
+
+
+def review_flags(home, config, state, rows, counts):
     progress('%d new flag%s to review. Reading Native context...' % (len(rows), '' if len(rows) == 1 else 's'))
     context, context_note = native_context(config)
     friction_records = friction_context(config)
@@ -501,6 +532,48 @@ def review(home, config, new_only=False):
             '%d ' % added, tally['include'] - added, tally['uncertain'])
         subprocess.run(['osascript', '-e', 'display notification %s with title "Goldfish review"' % json.dumps(message)],
                        capture_output=True, timeout=15, check=False)
+    return path
+
+
+def run_status(home):
+    """Whether a review is running, how the last one ended, and what is still waiting. Takes no lock."""
+    log = home / 'review.log'
+    lines = [l for l in (log.read_text().splitlines() if log.exists() else []) if l.startswith('[')]
+    busy = False
+    if (home / 'lock').exists():
+        with (home / 'lock').open('a') as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(stream, fcntl.LOCK_UN)
+            except BlockingIOError:
+                busy = True
+    entries = [(l[1:20], l[22:]) for l in lines]
+    last_at, last = entries[-1] if entries else (None, '')
+    ended = last.startswith(('Done.', 'Stopped:'))
+    running = busy and entries and not ended
+    if not entries:
+        print('No review with flags has run yet.')
+    elif running:
+        print('A review is running (started %s). Latest step at %s: %s' % (entries[0][0], last_at[11:], last))
+    elif last.startswith('Done.'):
+        print('Last review finished at %s. %s' % (last_at, last[len('Done. '):]))
+    elif ended:
+        print('Last review stopped at %s (%s), after: %s' % (
+            last_at, last[len('Stopped: '):], entries[-2][1] if len(entries) > 1 else 'starting'))
+    else:
+        print('Last review ended without finishing at about %s, after: %s' % (last_at, last))
+    if busy and not running:
+        print('Another kit command is running right now.')
+    if not running:
+        rows, counts = flags(configuration(home), state_load(home), new_only=True)
+        waiting = len(rows) + counts['remaining']
+        if waiting:
+            print('%d flag%s waiting for review: run ./goldfish review --new-only, or the next scheduled run '
+                  'will pick %s up.' % (waiting, '' if waiting == 1 else 's', 'it' if waiting == 1 else 'them'))
+        else:
+            print('Nothing waiting for review.')
+    if entries:
+        print('Log: %s' % log)
 
 
 def read_plan(path):
@@ -947,6 +1020,7 @@ def main(argv=None):
     p = commands.add_parser('pending'); p.add_argument('--new-only', action='store_true')
     p = commands.add_parser('review'); p.add_argument('--new-only', action='store_true')
     commands.add_parser('latest'); commands.add_parser('login'); commands.add_parser('doctor')
+    commands.add_parser('status', help='Is a review running, and where did the last one get to?')
     p = commands.add_parser('show'); p.add_argument('plan', type=Path)
     p = commands.add_parser('seal'); p.add_argument('plan', type=Path)
     p = commands.add_parser('apply'); p.add_argument('plan', type=Path); p.add_argument('--items', required=True)
@@ -958,6 +1032,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     home = args.home.expanduser().resolve()
     nc.AUTH = home / 'native-auth.json'
+    if args.command == 'status':
+        run_status(home); return  # no lock: it must answer while a review holds it
     with locked(home):
         if args.command == 'install':
             install(home, args); return
